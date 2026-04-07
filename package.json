@@ -42,7 +42,7 @@
         "format": "prettier --write ."
     },
     "keywords": [],
-    "author": "vladmeer",
+    "author": "ggxforce",
     "license": "ISC",
     "type": "commonjs",
     "description": "",
