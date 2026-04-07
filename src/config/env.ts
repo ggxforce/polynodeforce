@@ -19,7 +19,6 @@ const validateRequiredEnv = (): void => {
         'PRIVATE_KEY',
         'CLOB_HTTP_URL',
         'CLOB_WS_URL',
-        'MONGO_URI',
         'RPC_URL',
         'USDC_CONTRACT_ADDRESS',
     ];
@@ -152,21 +151,7 @@ const validateUrls = (): void => {
         throw new Error(`Invalid RPC_URL: ${process.env.RPC_URL}. Must be a valid HTTP/HTTPS URL.`);
     }
 
-    if (process.env.MONGO_URI && !process.env.MONGO_URI.startsWith('mongodb')) {
-        console.error('\n❌ Invalid MONGO_URI\n');
-        console.error(`Current value: ${process.env.MONGO_URI}`);
-        console.error('Must start with: mongodb:// or mongodb+srv://\n');
-        console.error('💡 Setup MongoDB Atlas (free):');
-        console.error('   1. Visit https://www.mongodb.com/cloud/atlas/register');
-        console.error('   2. Create a free cluster');
-        console.error('   3. Create database user with password');
-        console.error('   4. Whitelist IP: 0.0.0.0/0 (or your IP)');
-        console.error('   5. Get connection string from "Connect" button\n');
-        console.error('Example: mongodb+srv://username:password@cluster.mongodb.net/database\n');
-        throw new Error(
-            `Invalid MONGO_URI: ${process.env.MONGO_URI}. Must be a valid MongoDB connection string.`
-        );
-    }
+
 };
 
 // Run all validations
@@ -346,7 +331,6 @@ export const ENV = {
         10
     ), // 5 minutes default
     DRY_MODE: process.env.DRY_MODE === 'true',
-    MONGO_URI: process.env.MONGO_URI as string,
     RPC_URL: process.env.RPC_URL as string,
     USDC_CONTRACT_ADDRESS: process.env.USDC_CONTRACT_ADDRESS as string,
 };
