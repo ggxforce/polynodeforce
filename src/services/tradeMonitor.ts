@@ -118,8 +118,9 @@ const fetchTradeData = async () => {
 
             // Process each activity
             for (const activity of activities) {
-                // Skip if too old
-                if (activity.timestamp < TOO_OLD_TIMESTAMP) {
+                // Skip if too old or before monitor started
+                const tooOldLimit = Math.floor(Date.now() / 1000) - (TOO_OLD_TIMESTAMP * 3600);
+                if (activity.timestamp < tooOldLimit || activity.timestamp < MONITOR_START_TIMESTAMP) {
                     continue;
                 }
 
@@ -215,6 +216,8 @@ const fetchTradeData = async () => {
 let isFirstRun = true;
 // Track if monitor should continue running
 let isRunning = true;
+// Initial timestamp to skip historical trades (set on startup)
+let MONITOR_START_TIMESTAMP = Math.floor(Date.now() / 1000);
 
 /**
  * Stop the trade monitor gracefully
@@ -226,28 +229,17 @@ export const stopTradeMonitor = () => {
 
 const tradeMonitor = async () => {
     await init();
+    
+    // Set initial timestamp to now to avoid backfilling old trades
+    MONITOR_START_TIMESTAMP = Math.floor(Date.now() / 1000);
+    
     Logger.success(`Monitoring ${USER_ADDRESSES.length} trader(s) every ${FETCH_INTERVAL}s`);
+    Logger.info(`Starting check from timestamp: ${MONITOR_START_TIMESTAMP} (Right now)`);
     Logger.separator();
 
-    // On first run, mark all existing historical trades as already processed
-    if (isFirstRun) {
-        Logger.info('First run: marking all historical trades as processed...');
-        for (const { address, UserActivity } of userModels) {
-            const count = await UserActivity.updateMany(
-                { bot: false },
-                { $set: { bot: true, botExcutedTime: 999 } }
-            );
-            if (count.modifiedCount > 0) {
-                Logger.info(
-                    `Marked ${count.modifiedCount} historical trades as processed for ${address.slice(0, 6)}...${address.slice(-4)}`
-                );
-            }
-        }
-        isFirstRun = false;
-        Logger.success('\nHistorical trades processed. Now monitoring for new trades only.');
-        Logger.separator();
-    }
-
+    // On first run, we skip the marking because we use MONITOR_START_TIMESTAMP
+    // but we still do a quick init check if needed.
+    
     while (isRunning) {
         await fetchTradeData();
         if (!isRunning) break;
