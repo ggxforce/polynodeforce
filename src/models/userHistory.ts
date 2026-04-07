@@ -52,20 +52,22 @@ const getUserActivityModel = (walletAddress: string) => {
     }
     const store = activityStores[walletAddress];
 
+    const UserActivityConstructor = function (data: any) {
+        const instance = {
+            _id: Math.random().toString(),
+            ...data,
+            toObject: function () {
+                return { ...this };
+            },
+            save: async () => {
+                store.push(instance as unknown as UserActivityDoc);
+            },
+        };
+        return instance;
+    } as unknown as { new (data: any): UserActivityDoc };
+
     return Object.assign(
-        function UserActivityConstructor(data: any) {
-            const instance = {
-                _id: Math.random().toString(),
-                ...data,
-                toObject: function () {
-                    return { ...this };
-                },
-                save: async () => {
-                    store.push(instance as UserActivityDoc);
-                },
-            };
-            return instance;
-        },
+        UserActivityConstructor,
         {
             async countDocuments() {
                 return store.length;
