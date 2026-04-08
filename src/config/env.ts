@@ -113,6 +113,13 @@ const validateNumericConfig = (): void => {
             `Invalid NETWORK_RETRY_LIMIT: ${process.env.NETWORK_RETRY_LIMIT}. Must be between 1 and 10.`
         );
     }
+
+    const slippageTolerance = parseFloat(process.env.SLIPPAGE_TOLERANCE || '0.05');
+    if (isNaN(slippageTolerance) || slippageTolerance < 0 || slippageTolerance > 1) {
+        throw new Error(
+            `Invalid SLIPPAGE_TOLERANCE: ${process.env.SLIPPAGE_TOLERANCE}. Must be a decimal between 0 and 1 (e.g. 0.05 for 5%).`
+        );
+    }
 };
 
 /**
@@ -331,6 +338,10 @@ export const ENV = {
         10
     ), // 5 minutes default
     DRY_MODE: process.env.DRY_MODE === 'true',
+    SLIPPAGE_TOLERANCE: parseFloat(process.env.SLIPPAGE_TOLERANCE || '0.05'),
     RPC_URL: process.env.RPC_URL as string,
     USDC_CONTRACT_ADDRESS: process.env.USDC_CONTRACT_ADDRESS as string,
+    // Monitoring settings
+    METRICS_PORT: parseInt(process.env.METRICS_PORT || '9091', 10),
+    LOKI_URL: process.env.LOKI_URL || '',
 };

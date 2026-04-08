@@ -6,6 +6,7 @@ import tradeMonitor, { stopTradeMonitor } from './services/tradeMonitor';
 import Logger from './utils/logger';
 import { performHealthCheck, logHealthCheck } from './utils/healthCheck';
 import { redeemPositionsAuto } from './scripts/redeemResolvedPositions';
+import { initTelemetry } from './utils/telemetry';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const PROXY_WALLET = ENV.PROXY_WALLET;
@@ -77,6 +78,9 @@ export const main = async () => {
         
     
         Logger.startup(USER_ADDRESSES, PROXY_WALLET);
+        
+        // Initialize telemetry (metrics & logs)
+        initTelemetry();
 
         // Perform initial health check
         Logger.info('Performing initial health check...');

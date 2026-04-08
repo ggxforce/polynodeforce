@@ -1,14 +1,17 @@
 import chalk from 'chalk';
 import * as fs from 'fs';
 import * as path from 'path';
+import winston from 'winston';
+import LokiTransport from 'winston-loki';
+import { ENV } from '../config/env';
 
 class Logger {
     private static logsDir = path.join(process.cwd(), 'logs');
-    private static currentLogFile = '';
+    private static winstonLogger: winston.Logger;
 
-    private static getLogFileName(): string {
-        const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-        return path.join(this.logsDir, `bot-${date}.log`);
+    static {
+        this.ensureLogsDir();
+        this.initializeWinston();
     }
 
     private static ensureLogsDir(): void {
@@ -17,20 +20,63 @@ class Logger {
         }
     }
 
+    private static initializeWinston() {
+        const transports: winston.transport[] = [
+            new winston.transports.File({ 
+                filename: path.join(this.logsDir, 'bot-combined.log'),
+                format: winston.format.combine(
+                    winston.format.timestamp(),
+                    winston.format.json()
+                )
+            }),
+            new winston.transports.File({ 
+                filename: path.join(this.logsDir, 'bot-error.log'), 
+                level: 'error',
+                format: winston.format.combine(
+                    winston.format.timestamp(),
+                    winston.format.json()
+                )
+            })
+        ];
+
+        if (ENV.LOKI_URL) {
+            transports.push(new LokiTransport({
+                host: ENV.LOKI_URL,
+                labels: { app: 'polymarket-bot' },
+                json: true,
+                format: winston.format.json(),
+                replaceTimestamp: true,
+                onConnectionError: (err) => console.error('Loki connection error:', err)
+            }));
+        }
+
+        this.winstonLogger = winston.createLogger({
+            level: 'info',
+            transports
+        });
+    }
+
+    private static writeToWinston(level: string, message: string, meta?: any) {
+        this.winstonLogger.log(level, this.stripAnsi(message), meta);
+    }
+
+    private static getLogFileName(): string {
+        const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+        return path.join(this.logsDir, `bot-${date}.log`);
+    }
+
     private static writeToFile(message: string): void {
         try {
-            this.ensureLogsDir();
             const logFile = this.getLogFileName();
             const timestamp = new Date().toISOString();
             const logEntry = `[${timestamp}] ${message}\n`;
             fs.appendFileSync(logFile, logEntry, 'utf8');
         } catch (error) {
-            // Silently fail to avoid infinite loops
+            // Silently fail
         }
     }
 
     private static stripAnsi(str: string): string {
-        // Remove ANSI color codes for file logging
         return str.replace(/\u001b\[\d+m/g, '');
     }
 
@@ -39,7 +85,6 @@ class Logger {
     }
 
     private static maskAddress(address: string): string {
-        // Show 0x and first 4 chars, mask middle, show last 4 chars
         return `${address.slice(0, 6)}${'*'.repeat(34)}${address.slice(-4)}`;
     }
 
@@ -47,27 +92,56 @@ class Logger {
         console.log('\n' + chalk.cyan('━'.repeat(70)));
         console.log(chalk.cyan.bold(`  ${title}`));
         console.log(chalk.cyan('━'.repeat(70)) + '\n');
-        this.writeToFile(`HEADER: ${title}`);
+        this.writeToWinston('info', `HEADER: ${title}`);
     }
 
     static info(message: string) {
         console.log(chalk.blue('[INFO]'), message);
-        this.writeToFile(`INFO: ${message}`);
+        this.writeToWinston('info', message);
     }
 
     static success(message: string) {
         console.log(chalk.green('[SUCCESS]'), message);
-        this.writeToFile(`SUCCESS: ${message}`);
+        this.writeToWinston('info', `SUCCESS: ${message}`);
     }
 
     static warning(message: string) {
         console.log(chalk.yellow('[WARNING]'), message);
-        this.writeToFile(`WARNING: ${message}`);
+        this.writeToWinston('warn', message);
     }
 
-    static error(message: string) {
+    static error(message: string, error?: any) {
         console.log(chalk.red('[ERROR]'), message);
-        this.writeToFile(`ERROR: ${message}`);
+        if (error) console.error(error);
+        this.writeToWinston('error', message, { error: error?.message || error });
+    }
+
+    static aggregatedTrade(traderAddress: string, action: string, details: any) {
+        console.log('\n' + chalk.cyanBright('━'.repeat(70)));
+        console.log(chalk.cyanBright.bold('📦 --- AGGREGATED TRADE READY ---'));
+        console.log(chalk.gray(`Trader: ${this.formatAddress(traderAddress)}`));
+        console.log(chalk.gray(`Action: ${chalk.white.bold(action)} (Combined ${details.count} trades)`));
+        if (details.asset) {
+            console.log(chalk.gray(`Asset:  ${this.formatAddress(details.asset)}`));
+        }
+        if (details.side) {
+            const sideColor = details.side === 'BUY' ? chalk.green : chalk.red;
+            console.log(chalk.gray(`Side:   ${sideColor.bold(details.side)}`));
+        }
+        if (details.amount) {
+            console.log(chalk.gray(`Total Amount: ${chalk.yellow(`$${details.amount.toFixed(2)}`)}`));
+        }
+        if (details.avgPrice) {
+            console.log(chalk.gray(`Avg Entry:    ${chalk.cyan(details.avgPrice.toFixed(4))}`));
+        }
+        if (details.eventSlug || details.slug) {
+            const slug = details.eventSlug || details.slug;
+            const marketUrl = `https://polymarket.com/event/${slug}`;
+            console.log(chalk.gray(`Market:       ${chalk.blue.underline(marketUrl)}`));
+        }
+        console.log(chalk.cyanBright('━'.repeat(70)) + '\n');
+
+        this.writeToWinston('info', 'AGGREGATED_TRADE', { traderAddress, action, ...details });
     }
 
     static trade(traderAddress: string, action: string, details: any) {
@@ -89,7 +163,6 @@ class Logger {
             console.log(chalk.gray(`Price:  ${chalk.cyan(details.price)}`));
         }
         if (details.eventSlug || details.slug) {
-            // Use eventSlug for the correct market URL format
             const slug = details.eventSlug || details.slug;
             const marketUrl = `https://polymarket.com/event/${slug}`;
             console.log(chalk.gray(`Market: ${chalk.blue.underline(marketUrl)}`));
@@ -100,14 +173,7 @@ class Logger {
         }
         console.log(chalk.magenta('─'.repeat(70)) + '\n');
 
-        // Log to file
-        let tradeLog = `TRADE: ${this.formatAddress(traderAddress)} - ${action}`;
-        if (details.side) tradeLog += ` | Side: ${details.side}`;
-        if (details.amount) tradeLog += ` | Amount: $${details.amount}`;
-        if (details.price) tradeLog += ` | Price: ${details.price}`;
-        if (details.title) tradeLog += ` | Market: ${details.title}`;
-        if (details.transactionHash) tradeLog += ` | TX: ${details.transactionHash}`;
-        this.writeToFile(tradeLog);
+        this.writeToWinston('info', 'TRADE_DETECTED', { traderAddress, action, ...details });
     }
 
     static balance(myBalance: number, traderBalance: number, traderAddress: string) {
@@ -120,15 +186,16 @@ class Logger {
                 `  Trader total capital: ${chalk.blue.bold(`$${traderBalance.toFixed(2)}`)} (${this.formatAddress(traderAddress)})`
             )
         );
+        this.writeToWinston('info', 'BALANCE_CHECK', { myBalance, traderBalance, traderAddress });
     }
 
-    static orderResult(success: boolean, message: string) {
+    static orderResult(success: boolean, message: string, details?: any) {
         if (success) {
             console.log(chalk.green('[SUCCESS]'), chalk.green.bold('Order executed:'), message);
-            this.writeToFile(`ORDER SUCCESS: ${message}`);
+            this.writeToWinston('info', `ORDER_SUCCESS: ${message}`, details);
         } else {
             console.log(chalk.red('[ERROR]'), chalk.red.bold('Order failed:'), message);
-            this.writeToFile(`ORDER FAILED: ${message}`);
+            this.writeToWinston('error', `ORDER_FAILED: ${message}`, details);
         }
     }
 
@@ -143,7 +210,6 @@ class Logger {
 
     static startup(traders: string[], myWallet: string) {
         console.log('\n');
-        // ASCII Art Logo with gradient colors
         console.log(chalk.cyan('  ____       _        ____                 '));
         console.log(chalk.cyan(' |  _ \\ ___ | |_   _ / ___|___  _ __  _   _ '));
         console.log(chalk.cyan.bold(" | |_) / _ \\| | | | | |   / _ \\| '_ \\| | | |"));
@@ -159,6 +225,8 @@ class Logger {
         });
         console.log(chalk.cyan(`\n--- Your Wallet ---`));
         console.log(chalk.gray(`   ${this.maskAddress(myWallet)}\n`));
+        
+        this.writeToWinston('info', 'BOT_STARTUP', { traders, myWallet });
     }
 
     static dbConnection(traders: string[], counts: number[]) {
@@ -206,7 +274,6 @@ class Logger {
         console.log(chalk.gray(`   Wallet: ${this.formatAddress(wallet)}`));
         console.log('');
 
-        // Show balance and portfolio overview
         const balanceStr = chalk.yellow.bold(`$${currentBalance.toFixed(2)}`);
         const totalPortfolio = currentBalance + totalValue;
         const portfolioStr = chalk.cyan.bold(`$${totalPortfolio.toFixed(2)}`);
@@ -230,7 +297,6 @@ class Logger {
             console.log(chalk.gray(`      Current Value:     ${valueStr}`));
             console.log(chalk.gray(`      Profit/Loss:       ${profitStr}`));
 
-            // Show top positions
             if (topPositions.length > 0) {
                 console.log(chalk.gray(`\n   Top Positions:`));
                 topPositions.forEach((pos: any) => {
@@ -257,6 +323,10 @@ class Logger {
             }
         }
         console.log('');
+        
+        this.writeToWinston('info', 'MY_POSITIONS_SUMMARY', { 
+            wallet, count, overallPnl, totalValue, initialValue, currentBalance, totalPortfolio 
+        });
     }
 
     static tradersPositions(
@@ -273,7 +343,6 @@ class Logger {
                     ? chalk.green(`${count} position${count > 1 ? 's' : ''}`)
                     : chalk.gray('0 positions');
 
-            // Add profitability if available
             let profitStr = '';
             if (profitabilities && profitabilities[index] !== undefined && count > 0) {
                 const pnl = profitabilities[index];
@@ -283,33 +352,10 @@ class Logger {
             }
 
             console.log(chalk.gray(`   ${this.formatAddress(address)}: ${countStr}${profitStr}`));
-
-            // Show position details if available
-            if (positionDetails && positionDetails[index] && positionDetails[index].length > 0) {
-                positionDetails[index].forEach((pos: any) => {
-                    const pnlColor = pos.percentPnl >= 0 ? chalk.green : chalk.red;
-                    const pnlSign = pos.percentPnl >= 0 ? '+' : '';
-                    const avgPrice = pos.avgPrice || 0;
-                    const curPrice = pos.curPrice || 0;
-                    console.log(
-                        chalk.gray(
-                            `      • ${pos.outcome} - ${pos.title.slice(0, 40)}${pos.title.length > 40 ? '...' : ''}`
-                        )
-                    );
-                    console.log(
-                        chalk.gray(
-                            `        Value: ${chalk.cyan(`$${pos.currentValue.toFixed(2)}`)} | PnL: ${pnlColor(`${pnlSign}${pos.percentPnl.toFixed(1)}%`)}`
-                        )
-                    );
-                    console.log(
-                        chalk.gray(
-                            `        Bought @ ${chalk.yellow(`${(avgPrice * 100).toFixed(1)}¢`)} | Current @ ${chalk.yellow(`${(curPrice * 100).toFixed(1)}¢`)}`
-                        )
-                    );
-                });
-            }
         });
         console.log('');
+        
+        this.writeToWinston('info', 'TRADERS_SUMMARY', { traders, positionCounts, profitabilities });
     }
 }
 

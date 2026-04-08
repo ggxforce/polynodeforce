@@ -4,6 +4,7 @@ import { UserActivityInterface, UserPositionInterface } from '../interfaces/User
 import { getUserActivityModel } from '../models/userHistory';
 import Logger from './logger';
 import { calculateOrderSize, getTradeMultiplier } from '../config/copyStrategy';
+import { metrics } from './metrics';
 
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
 const COPY_STRATEGY_CONFIG = ENV.COPY_STRATEGY_CONFIG;
@@ -68,12 +69,14 @@ const postOrder = async (
     condition: string,
     my_position: UserPositionInterface | undefined,
     user_position: UserPositionInterface | undefined,
-    trade: UserActivityInterface,
+    trade: any,
     my_balance: number,
     user_balance: number,
     userAddress: string
 ) => {
+    const startTime = Date.now();
     const UserActivity = getUserActivityModel(userAddress);
+    const tradeType = condition.toUpperCase();
     //Merge strategy
     if (condition === 'merge') {
         Logger.info('Executing MERGE strategy...');
@@ -168,7 +171,9 @@ const postOrder = async (
             await UserActivity.updateOne({ _id: trade._id }, { bot: true, botExcutedTime: retry });
         } else {
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+            metrics.recordTrade('completed', trade.isAggregated ? 'aggregated' : 'immediate');
         }
+        metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
     } else if (condition === 'buy') {
         //Buy strategy
         Logger.info('Executing BUY strategy...');
@@ -176,40 +181,44 @@ const postOrder = async (
         Logger.info(`Your balance: $${my_balance.toFixed(2)}`);
         Logger.info(`Trader bought: $${trade.usdcSize.toFixed(2)}`);
 
-        // Get current position size for position limit checks
         const currentPositionValue = my_position ? my_position.size * my_position.avgPrice : 0;
 
-        // Use new copy strategy system
-        const orderCalc = calculateOrderSize(
-            COPY_STRATEGY_CONFIG,
-            trade.usdcSize,
-            my_balance,
-            currentPositionValue
-        );
+        // Calculate or use aggregated order size
+        let orderCalc;
+        if (trade.isAggregated) {
+            orderCalc = {
+                finalAmount: trade.usdcSize,
+                reasoning: `using pre-calculated aggregated volume $${trade.usdcSize.toFixed(2)}`,
+                belowMinimum: false
+            };
+            Logger.info(`📦 Aggregation: ${orderCalc.reasoning}`);
+        } else {
+            // Use new copy strategy system for individual trades
+            orderCalc = calculateOrderSize(
+                COPY_STRATEGY_CONFIG,
+                trade.usdcSize,
+                my_balance,
+                currentPositionValue
+            );
+            Logger.info(`📊 ${orderCalc.reasoning}`);
+        }
 
-        // Log the calculation reasoning
-        Logger.info(`📊 ${orderCalc.reasoning}`);
-
-        // Check if order should be executed
+        // Log reasoning and check for early exit
         if (orderCalc.finalAmount === 0) {
-            Logger.warning(`❌ Cannot execute: ${orderCalc.reasoning}`);
-            if (orderCalc.belowMinimum) {
-                Logger.warning(`💡 Increase COPY_SIZE or wait for larger trades`);
-            }
+            // Silently complete if it's truly zero/invalid
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
             return;
         }
 
         let remaining = orderCalc.finalAmount;
-
         let retry = 0;
         let abortDueToFunds = false;
-        let totalBoughtTokens = 0; // Track total tokens bought for this trade
+        let totalBoughtTokens = 0;
 
         while (remaining > 0 && retry < RETRY_LIMIT) {
             const orderBook = await clobClient.getOrderBook(trade.asset);
             if (!orderBook.asks || orderBook.asks.length === 0) {
-                Logger.warning('No asks available in order book');
+                Logger.info(`[SKIP] No asks available for ${trade.slug || trade.asset}`);
                 await UserActivity.updateOne({ _id: trade._id }, { bot: true });
                 break;
             }
@@ -218,23 +227,36 @@ const postOrder = async (
                 return parseFloat(ask.price) < parseFloat(min.price) ? ask : min;
             }, orderBook.asks[0]);
 
-            Logger.info(`Best ask: ${minPriceAsk.size} @ $${minPriceAsk.price}`);
-            if (parseFloat(minPriceAsk.price) - 0.05 > trade.price) {
-                Logger.warning('Price slippage too high - skipping trade');
+            const bestAskPrice = parseFloat(minPriceAsk.price);
+            const slippagePercent = (bestAskPrice - trade.price) / trade.price;
+
+            if (slippagePercent > ENV.SLIPPAGE_TOLERANCE) {
+                // Discreet skip message instead of a warning block
+                Logger.info(
+                    `[SKIP] Slippage too high for ${trade.slug || trade.asset} (${(slippagePercent * 100).toFixed(1)}% > ${(ENV.SLIPPAGE_TOLERANCE * 100).toFixed(1)}%)`
+                );
                 await UserActivity.updateOne({ _id: trade._id }, { bot: true });
                 break;
             }
 
-            // Check if remaining amount is below minimum before creating order
+            // Check if remaining amount is below minimum
             if (remaining < MIN_ORDER_SIZE_USD) {
-                Logger.info(
-                    `Remaining amount ($${remaining.toFixed(2)}) below minimum - completing trade`
-                );
-                await UserActivity.updateOne(
-                    { _id: trade._id },
-                    { bot: true, myBoughtSize: totalBoughtTokens }
-                );
+                Logger.info(`[SKIP] Order size $${remaining.toFixed(2)} too small`);
+                await UserActivity.updateOne({ _id: trade._id }, { bot: true, myBoughtSize: totalBoughtTokens });
                 break;
+            }
+
+            // ONLY NOW that we are sure, show the full trade log
+            if (totalBoughtTokens === 0) {
+                Logger.trade(userAddress, 'BUY (Copying)', {
+                    asset: trade.asset,
+                    side: trade.side,
+                    amount: trade.usdcSize,
+                    price: trade.price,
+                    slug: trade.slug,
+                    eventSlug: trade.eventSlug,
+                });
+                Logger.info(`📊 Copying ${orderCalc.reasoning}`);
             }
 
             const maxOrderSize = parseFloat(minPriceAsk.size) * parseFloat(minPriceAsk.price);
@@ -267,6 +289,7 @@ const postOrder = async (
                     `Bought $${order_arges.amount.toFixed(2)} at $${order_arges.price} (${tokensBought.toFixed(2)} tokens)`
                 );
                 remaining -= order_arges.amount;
+                metrics.recordTrade(ENV.DRY_MODE ? 'simulated' : 'executed', trade.isAggregated ? 'aggregated' : 'immediate');
             } else {
                 const errorMessage = extractOrderError(resp);
                 if (isInsufficientBalanceOrAllowanceError(errorMessage)) {
@@ -290,6 +313,8 @@ const postOrder = async (
                 { _id: trade._id },
                 { bot: true, botExcutedTime: RETRY_LIMIT, myBoughtSize: totalBoughtTokens }
             );
+            metrics.recordTrade('failed', trade.isAggregated ? 'aggregated' : 'immediate');
+            metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
             return;
         }
         if (retry >= RETRY_LIMIT) {
@@ -302,7 +327,9 @@ const postOrder = async (
                 { _id: trade._id },
                 { bot: true, myBoughtSize: totalBoughtTokens }
             );
+            metrics.recordTrade('completed', trade.isAggregated ? 'aggregated' : 'immediate');
         }
+        metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
 
         // Log the tracked purchase for later sell reference
         if (totalBoughtTokens > 0) {
@@ -462,6 +489,7 @@ const postOrder = async (
                     `Sold ${order_arges.amount} tokens at $${order_arges.price}`
                 );
                 remaining -= order_arges.amount;
+                metrics.recordTrade(ENV.DRY_MODE ? 'simulated' : 'executed', trade.isAggregated ? 'aggregated' : 'immediate');
             } else {
                 const errorMessage = extractOrderError(resp);
                 if (isInsufficientBalanceOrAllowanceError(errorMessage)) {
@@ -520,13 +548,17 @@ const postOrder = async (
                 { _id: trade._id },
                 { bot: true, botExcutedTime: RETRY_LIMIT }
             );
+            metrics.recordTrade('failed', trade.isAggregated ? 'aggregated' : 'immediate');
+            metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
             return;
         }
         if (retry >= RETRY_LIMIT) {
             await UserActivity.updateOne({ _id: trade._id }, { bot: true, botExcutedTime: retry });
         } else {
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+            metrics.recordTrade('completed', trade.isAggregated ? 'aggregated' : 'immediate');
         }
+        metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
     } else {
         Logger.error(`Unknown condition: ${condition}`);
     }
