@@ -15,111 +15,134 @@ interface Market {
 }
 
 export const btcReversalService = async (clobClient: ClobClient) => {
-    Logger.info('Starting BTC 5m Reversal Strategy...');
-    Logger.info('Target: Bet $1 on the losing side 30s before expiration.');
+    Logger.info('🚀 BTC 5m Reversal Strategy Active (Gamma API Mode)');
+    Logger.info('Strategy: Bet $1 on the LOSING side 30s before expiration.');
+
+    const tradedMarkets = new Set<string>();
 
     while (true) {
         try {
-            // 1. Fetch active markets
-            // The CLOB API markets endpoint returns an object with a 'data' property
-            const response = await fetchData('https://clob.polymarket.com/markets');
-            const markets = Array.isArray(response) ? response : (response?.data || []);
+            // 1. Get the Event from Gamma API
+            // This is the specific event for BTC 5m
+            const gammaUrl = `https://gamma-api.polymarket.com/events?slug=btc-updown-5m`;
+            const events = await fetchData(gammaUrl);
 
-            if (!Array.isArray(markets)) {
-                throw new Error('Unexpected API response format: markets is not an array');
+            if (!Array.isArray(events) || events.length === 0) {
+                Logger.error('Could not find BTC 5m event on Gamma API. Retrying...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                continue;
             }
 
-            // Filter for BTC 5m markets that are active and NOT expired
+            const event = events[0];
+            const markets = event.markets || [];
+
             const now = new Date();
-            const activeMarkets = markets.filter(m =>
-                m.market_slug &&
-                m.market_slug.includes(BTC_5M_QUERY) &&
-                m.active === true &&
-                m.closed === false &&
-                new Date(m.end_date_iso) > now
+            // Filter outcomes that are not yet expired
+            const activeMarkets = markets.filter((m: any) => 
+                !m.closed && 
+                new Date(m.endDate) > now
             );
 
             if (activeMarkets.length === 0) {
-                await new Promise(resolve => setTimeout(resolve, 10000));
+                process.stdout.write(`\r[WAITING] No active 5m intervals found in event...   `);
+                await new Promise(resolve => setTimeout(resolve, 5000));
                 continue;
             }
 
-            // Sort by end date to find the one closing soonest
-            activeMarkets.sort((a, b) => new Date(a.end_date_iso).getTime() - new Date(b.end_date_iso).getTime());
+            // Sort by end date to find the current interval
+            activeMarkets.sort((a: any, b: any) => new Date(a.endDate).getTime() - new Date(b.endDate).getTime());
+            
+            const targetMarket = activeMarkets.find((m: any) => !tradedMarkets.has(m.id));
+            
+            if (!targetMarket) {
+                process.stdout.write(`\r[WAITING] Next market cycle not yet available...   `);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                continue;
+            }
 
-            const targetMarket = activeMarkets[0];
-            const expiration = new Date(targetMarket.end_date_iso);
+            const expiration = new Date(targetMarket.endDate);
             const msUntilExpiration = expiration.getTime() - Date.now();
             const secondsUntilExpiration = msUntilExpiration / 1000;
 
-            // If we are more than 40 seconds away, wait until 35 seconds before checking
             if (secondsUntilExpiration > 40) {
-                const waitTime = Math.min((secondsUntilExpiration - 35) * 1000, 30000);
-                // Logger.info(`Waiting for market ${targetMarket.market_slug} (Ends in ${Math.round(secondsUntilExpiration)}s)`);
-                await new Promise(resolve => setTimeout(resolve, waitTime));
+                process.stdout.write(`\r[TRACKING] Interval: ${targetMarket.groupItemTitle || targetMarket.conditionId} | Ends in: ${Math.round(secondsUntilExpiration)}s   `);
+                await new Promise(resolve => setTimeout(resolve, 2000));
                 continue;
             }
 
-            // At 30-35 seconds, we start monitoring closely
-            if (secondsUntilExpiration <= 35 && secondsUntilExpiration > 0) {
-                Logger.info(`Target market detected: ${targetMarket.market_slug} (Ends in ${Math.round(secondsUntilExpiration)}s)`);
+            // TRIGGER FLOW
+            if (secondsUntilExpiration <= 40 && secondsUntilExpiration > 0) {
+                Logger.clearLine();
+                Logger.header(`🎯 TARGETING: ${targetMarket.groupItemTitle || 'BTC 5m Cycle'}`);
+                Logger.info(`ID: ${targetMarket.id}`);
+                
+                // Parse tokens from target market
+                // Gamma API tokens are in 'clobTokenIds' stringified array or 'tokens' object
+                let tokens = targetMarket.tokens;
+                if (!tokens && targetMarket.clobTokenIds) {
+                    const ids = JSON.parse(targetMarket.clobTokenIds);
+                    tokens = ids.map((id: string, index: number) => ({
+                        token_id: id,
+                        outcome: index === 0 ? 'UP' : 'DOWN' // Standard for BTC 5m
+                    }));
+                }
 
-                // Wait exactly until 30 seconds
+                if (!tokens || tokens.length < 2) {
+                    Logger.error('Could not resolve tokens for market. Skipping...');
+                    tradedMarkets.add(targetMarket.id);
+                    continue;
+                }
+
+                // Wait for T-30s
                 if (secondsUntilExpiration > 30) {
                     await new Promise(resolve => setTimeout(resolve, (secondsUntilExpiration - 30) * 1000));
                 }
 
-                Logger.header(`🎯 EXECUTION TRIGGER: ${targetMarket.market_slug}`);
-
-                // 2. Identify reaching side
-                // Fetch current prices for tokens
-                const prices = await Promise.all(targetMarket.tokens.map(async (t: any) => {
-                    const book = await clobClient.getOrderBook(t.token_id);
-                    const bestAsk = book.asks.length > 0 ? parseFloat(book.asks[0].price) : 1;
-                    const bestBid = book.bids.length > 0 ? parseFloat(book.bids[0].price) : 0;
-                    const midPrice = (bestAsk + bestBid) / 2;
-                    return { ...t, price: midPrice };
+                Logger.info('Analyzing prices via CLOB...');
+                const prices = await Promise.all(tokens.map(async (t: any) => {
+                    const tid = t.token_id || t.tokenId;
+                    try {
+                        const book = await clobClient.getOrderBook(tid);
+                        const bestAsk = book.asks.length > 0 ? parseFloat(book.asks[0].price) : 1;
+                        const bestBid = book.bids.length > 0 ? parseFloat(book.bids[0].price) : 0;
+                        return { ...t, price: (bestAsk + bestBid) / 2, tokenId: tid };
+                    } catch (e) { return { ...t, price: 0.5, tokenId: tid }; }
                 }));
 
-                // The "losing" side is the one with the lowest price (least probable according to market)
                 prices.sort((a, b) => a.price - b.price);
                 const losingSide = prices[0];
+                
+                Logger.info(`Status: ${prices.map(p => `${p.outcome || p.outcomeName}: $${p.price.toFixed(2)}`).join(' vs ')}`);
+                Logger.success(`Selected Losing Side: ${losingSide.outcome || losingSide.outcomeName}`);
 
-                Logger.info(`Losing side identified: ${losingSide.outcome} @ $${losingSide.price.toFixed(3)}`);
-
-                // 3. Execute $1 trade
                 if (ENV.DRY_MODE) {
-                    Logger.info(`[DRY MODE] Would bet $1 on ${losingSide.outcome} for market ${targetMarket.market_slug}`);
+                    Logger.info(`[DRY MODE] Would bet $1.00 on ${losingSide.outcome || losingSide.outcomeName}`);
                 } else {
-                    Logger.info(`Placing $1 order on ${losingSide.outcome}...`);
-                    try {
-                        const order_args = {
-                            side: Side.BUY,
-                            tokenID: losingSide.token_id,
-                            amount: 1.0,
-                            price: 0.99, // High limit price for market-like execution
-                        };
-                        const signedOrder = await clobClient.createMarketOrder(order_args);
-                        const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
-
-                        if (resp.success) {
-                            Logger.success(`Successfully bet $1 on ${losingSide.outcome}!`);
-                        } else {
-                            Logger.error(`Trade failed: ${JSON.stringify(resp)}`);
-                        }
-                    } catch (e) {
-                        Logger.error(`Error during execution: ${e}`);
+                    Logger.info('Placing $1.00 Market Order...');
+                    const order_args = {
+                        side: Side.BUY,
+                        tokenID: losingSide.tokenId,
+                        amount: 1.0,
+                        price: 0.99,
+                    };
+                    const signedOrder = await clobClient.createMarketOrder(order_args);
+                    const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
+                    
+                    if (resp.success) {
+                        Logger.success('Order Success!');
+                        tradedMarkets.add(targetMarket.id);
+                    } else {
+                        Logger.error(`Order Failed: ${JSON.stringify(resp)}`);
                     }
                 }
 
-                // Wait until the current market is definitely closed before searching again
-                const bufferWait = msUntilExpiration + 5000;
-                Logger.info(`Market execution finished. Waiting for next market cycle...`);
-                await new Promise(resolve => setTimeout(resolve, Math.max(bufferWait, 10000)));
+                Logger.info('Cycle complete. Waiting for next market...');
+                await new Promise(resolve => setTimeout(resolve, msUntilExpiration + 5000));
             }
 
         } catch (error) {
-            Logger.error(`BTC Reversal Strategy Error: ${error}`);
+            Logger.clearLine();
+            Logger.error(`Strategy Error: ${error instanceof Error ? error.message : error}`);
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
