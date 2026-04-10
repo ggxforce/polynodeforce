@@ -143,9 +143,15 @@ export function calculateOrderSize(
 
     // Step 5: Check minimum order size
     if (finalAmount < config.minOrderSizeUSD) {
-        belowMinimum = true;
-        reasoning += ` → Below minimum $${config.minOrderSizeUSD}`;
-        finalAmount = 0; // Don't execute
+        if (finalAmount >= 0.30) {
+            reasoning += ` → Small trade ($${finalAmount.toFixed(2)}) rounded up to minimum $${config.minOrderSizeUSD.toFixed(2)}`;
+            finalAmount = config.minOrderSizeUSD;
+            belowMinimum = false;
+        } else {
+            belowMinimum = true;
+            reasoning += ` → Below minimum $${config.minOrderSizeUSD.toFixed(2)}`;
+            finalAmount = 0; // Don't execute
+        }
     }
 
     return {
