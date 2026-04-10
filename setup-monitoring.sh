@@ -15,20 +15,25 @@ if ! command -v docker &> /dev/null; then
 fi
 
 # 2. Check for Docker Compose
+DOCKER_CMD="docker compose"
 if ! docker compose version &> /dev/null; then
-    echo -e "\033[0;31m[ERROR] Docker Compose (v2) is not installed.\033[0m"
-    echo "Tip: sudo apt-get install docker-compose-plugin"
-    exit 1
+    if command -v docker-compose &> /dev/null; then
+        DOCKER_CMD="docker-compose"
+    else
+        echo -e "\033[0;31m[ERROR] Docker Compose (v2) is not installed.\033[0m"
+        echo "Tip: sudo apt-get install docker-compose-plugin"
+        exit 1
+    fi
 fi
 
-# 3. Ensure provisioning directories exist (already created by assistant usually, but safety first)
+# 3. Ensure provisioning directories exist
 mkdir -p monitoring/grafana/provisioning/dashboards
 mkdir -p monitoring/grafana/provisioning/datasources
 
 # 4. Start Monitoring Stack
 echo -e "\033[0;34m[1/3] Starting containers...\033[0m"
 cd monitoring
-sudo docker compose up -d
+sudo $DOCKER_CMD up -d
 
 if [ $? -ne 0 ]; then
     echo -e "\033[0;31m[ERROR] Failed to start Docker containers.\033[0m"

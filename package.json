@@ -40,7 +40,7 @@
         "lint": "eslint .",
         "lint:fix": "eslint --fix .",
         "format": "prettier --write .",
-        "monitor": "setup-monitoring.bat"
+        "monitor": "chmod +x setup-monitoring.sh && ./setup-monitoring.sh"
     },
     "keywords": [],
     "author": "ggxforce",
