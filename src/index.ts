@@ -102,8 +102,8 @@ export const main = async () => {
         Logger.info('Starting trade executor...');
         tradeExecutor(clobClient);
 
-        // Auto-redeem resolved positions check (every 1 hour)
-        Logger.info('Setting up auto-redeem interval for resolved positions (1 hour).');
+        // Auto-redeem resolved positions check (every 10 minutes)
+        Logger.info('Setting up auto-redeem interval for resolved positions (10 minutes).');
         autoRedeemInterval = setInterval(async () => {
             try {
                 if (!ENV.DRY_MODE) {
@@ -112,7 +112,7 @@ export const main = async () => {
             } catch (err) {
                 Logger.error(`Auto redeem error: ${err}`);
             }
-        }, 1000 * 60 * 60);
+        }, 1000 * 60 * 10);
 
         // test(clobClient);
     } catch (error) {
