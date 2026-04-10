@@ -39,7 +39,8 @@
         "test-latency": "ts-node src/scripts/testLatency.ts",
         "lint": "eslint .",
         "lint:fix": "eslint --fix .",
-        "format": "prettier --write ."
+        "format": "prettier --write .",
+        "monitor": "setup-monitoring.bat"
     },
     "keywords": [],
     "author": "ggxforce",
