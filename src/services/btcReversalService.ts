@@ -20,14 +20,22 @@ export const btcReversalService = async (clobClient: ClobClient) => {
 
     while (true) {
         try {
-            // 1. Fetch active BTC 5m markets
-            // We use the Gamma API or CLOB API to find active markets
-            const markets: Market[] = await fetchData('https://clob.polymarket.com/markets');
-            
-            // Filter for BTC 5m markets that are NOT expired
+            // 1. Fetch active markets
+            // The CLOB API markets endpoint returns an object with a 'data' property
+            const response = await fetchData('https://clob.polymarket.com/markets');
+            const markets = Array.isArray(response) ? response : (response?.data || []);
+
+            if (!Array.isArray(markets)) {
+                throw new Error('Unexpected API response format: markets is not an array');
+            }
+
+            // Filter for BTC 5m markets that are active and NOT expired
             const now = new Date();
-            const activeMarkets = markets.filter(m => 
-                m.market_slug.includes(BTC_5M_QUERY) && 
+            const activeMarkets = markets.filter(m =>
+                m.market_slug &&
+                m.market_slug.includes(BTC_5M_QUERY) &&
+                m.active === true &&
+                m.closed === false &&
                 new Date(m.end_date_iso) > now
             );
 
@@ -38,7 +46,7 @@ export const btcReversalService = async (clobClient: ClobClient) => {
 
             // Sort by end date to find the one closing soonest
             activeMarkets.sort((a, b) => new Date(a.end_date_iso).getTime() - new Date(b.end_date_iso).getTime());
-            
+
             const targetMarket = activeMarkets[0];
             const expiration = new Date(targetMarket.end_date_iso);
             const msUntilExpiration = expiration.getTime() - Date.now();
@@ -55,7 +63,7 @@ export const btcReversalService = async (clobClient: ClobClient) => {
             // At 30-35 seconds, we start monitoring closely
             if (secondsUntilExpiration <= 35 && secondsUntilExpiration > 0) {
                 Logger.info(`Target market detected: ${targetMarket.market_slug} (Ends in ${Math.round(secondsUntilExpiration)}s)`);
-                
+
                 // Wait exactly until 30 seconds
                 if (secondsUntilExpiration > 30) {
                     await new Promise(resolve => setTimeout(resolve, (secondsUntilExpiration - 30) * 1000));
@@ -65,7 +73,7 @@ export const btcReversalService = async (clobClient: ClobClient) => {
 
                 // 2. Identify reaching side
                 // Fetch current prices for tokens
-                const prices = await Promise.all(targetMarket.tokens.map(async (t) => {
+                const prices = await Promise.all(targetMarket.tokens.map(async (t: any) => {
                     const book = await clobClient.getOrderBook(t.token_id);
                     const bestAsk = book.asks.length > 0 ? parseFloat(book.asks[0].price) : 1;
                     const bestBid = book.bids.length > 0 ? parseFloat(book.bids[0].price) : 0;
@@ -76,7 +84,7 @@ export const btcReversalService = async (clobClient: ClobClient) => {
                 // The "losing" side is the one with the lowest price (least probable according to market)
                 prices.sort((a, b) => a.price - b.price);
                 const losingSide = prices[0];
-                
+
                 Logger.info(`Losing side identified: ${losingSide.outcome} @ $${losingSide.price.toFixed(3)}`);
 
                 // 3. Execute $1 trade
@@ -88,12 +96,12 @@ export const btcReversalService = async (clobClient: ClobClient) => {
                         const order_args = {
                             side: Side.BUY,
                             tokenID: losingSide.token_id,
-                            amount: 1.0, 
+                            amount: 1.0,
                             price: 0.99, // High limit price for market-like execution
                         };
                         const signedOrder = await clobClient.createMarketOrder(order_args);
                         const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
-                        
+
                         if (resp.success) {
                             Logger.success(`Successfully bet $1 on ${losingSide.outcome}!`);
                         } else {
