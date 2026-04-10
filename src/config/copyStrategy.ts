@@ -78,26 +78,45 @@ export function calculateOrderSize(
     let baseAmount: number;
     let reasoning: string;
 
-    // Step 1: Calculate base amount based on strategy
-    switch (config.strategy) {
-        case CopyStrategy.PERCENTAGE:
-            baseAmount = traderOrderSize * (config.copySize / 100);
-            reasoning = `${config.copySize}% of trader's $${traderOrderSize.toFixed(2)} = $${baseAmount.toFixed(2)}`;
-            break;
+    // Special logic for small trader orders (< $1)
+    if (traderOrderSize < 1.0) {
+        if (traderOrderSize >= 0.65) {
+            baseAmount = 1.0;
+            reasoning = `Trader bet is < $1.00 but >= $0.65, rounding to minimum $1.00 as requested`;
+        } else {
+            return {
+                traderOrderSize,
+                baseAmount: 0,
+                finalAmount: 0,
+                strategy: config.strategy,
+                cappedByMax: false,
+                reducedByBalance: false,
+                belowMinimum: true,
+                reasoning: `Trader bet ($${traderOrderSize.toFixed(2)}) is below 0.65 threshold. Skipping.`,
+            };
+        }
+    } else {
+        // Step 1: Calculate base amount based on strategy
+        switch (config.strategy) {
+            case CopyStrategy.PERCENTAGE:
+                baseAmount = traderOrderSize * (config.copySize / 100);
+                reasoning = `${config.copySize}% of trader's $${traderOrderSize.toFixed(2)} = $${baseAmount.toFixed(2)}`;
+                break;
 
-        case CopyStrategy.FIXED:
-            baseAmount = config.copySize;
-            reasoning = `Fixed amount: $${baseAmount.toFixed(2)}`;
-            break;
+            case CopyStrategy.FIXED:
+                baseAmount = config.copySize;
+                reasoning = `Fixed amount: $${baseAmount.toFixed(2)}`;
+                break;
 
-        case CopyStrategy.ADAPTIVE:
-            const adaptivePercent = calculateAdaptivePercent(config, traderOrderSize);
-            baseAmount = traderOrderSize * (adaptivePercent / 100);
-            reasoning = `Adaptive ${adaptivePercent.toFixed(1)}% of trader's $${traderOrderSize.toFixed(2)} = $${baseAmount.toFixed(2)}`;
-            break;
+            case CopyStrategy.ADAPTIVE:
+                const adaptivePercent = calculateAdaptivePercent(config, traderOrderSize);
+                baseAmount = traderOrderSize * (adaptivePercent / 100);
+                reasoning = `Adaptive ${adaptivePercent.toFixed(1)}% of trader's $${traderOrderSize.toFixed(2)} = $${baseAmount.toFixed(2)}`;
+                break;
 
-        default:
-            throw new Error(`Unknown strategy: ${config.strategy}`);
+            default:
+                throw new Error(`Unknown strategy: ${config.strategy}`);
+        }
     }
 
     // Step 1.5: Apply tiered or single multiplier based on trader's order size
@@ -141,18 +160,19 @@ export function calculateOrderSize(
         reasoning += ` → Reduced to fit balance ($${maxAffordable.toFixed(2)})`;
     }
 
-    // Step 5: Check minimum order size
-    if (finalAmount < config.minOrderSizeUSD) {
-        if (finalAmount >= 0.30) {
-            reasoning += ` → Small trade ($${finalAmount.toFixed(2)}) rounded up to minimum $${config.minOrderSizeUSD.toFixed(2)}`;
-            finalAmount = config.minOrderSizeUSD;
+    // Step 5: Check minimum order size and rounding logic
+    if (finalAmount <= 2.0) {
+        if (finalAmount >= 0.65) {
+            reasoning += ` → Calculated amount ($${finalAmount.toFixed(2)}) is between $0.65 and $2.00, rounding to $1.00 as requested`;
+            finalAmount = 1.0;
             belowMinimum = false;
         } else {
             belowMinimum = true;
-            reasoning += ` → Below minimum $${config.minOrderSizeUSD.toFixed(2)}`;
+            reasoning += ` → Below requested minimum $0.65 threshold`;
             finalAmount = 0; // Don't execute
         }
     }
+
 
     return {
         traderOrderSize,

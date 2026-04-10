@@ -183,7 +183,7 @@ const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
     // Trades producing $0.30-$0.99 will be rounded up to $1.00 by calculateOrderSize.
     // Only truly dust trades (producing < $0.30) are skipped.
     const copyPercent = ENV.COPY_STRATEGY_CONFIG.copySize / 100;
-    const minViableTraderSize = 0.30 / copyPercent; // e.g. at 3%: $0.30/0.03 = $10
+    const minViableTraderSize = 0.65 / copyPercent; // Updated to 0.65 threshold
 
     const viableTrades: TradeWithUser[] = [];
     const skippedIds: any[] = [];
@@ -367,7 +367,7 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                 if (trades.length > 0) {
                     // Pre-filter: skip dust trades and stale trades BEFORE any API calls
                     const copyPercent = ENV.COPY_STRATEGY_CONFIG.copySize / 100;
-                    const minViableTraderSize = 0.30 / copyPercent;
+                    const minViableTraderSize = 0.65 / copyPercent;
                     
                     const viableTrades: TradeWithUser[] = [];
                     const dustIds: any[] = [];
