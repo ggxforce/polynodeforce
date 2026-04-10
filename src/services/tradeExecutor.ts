@@ -333,12 +333,8 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                     const userOrderSize = orderCalc.finalAmount;
 
                     if (trade.side === 'BUY' && userOrderSize < TRADE_AGGREGATION_MIN_TOTAL_USD) {
-                        // CLEAR WARNING FOR AGGREGATION
-                        console.log(chalk.yellow('\n  ┌' + '─'.repeat(66) + '┐'));
-                        console.log(chalk.yellow('  │') + chalk.yellow.bold(' 📦 AGGREGATING SMALL TRADE ') + ' '.repeat(38) + chalk.yellow('│'));
-                        console.log(chalk.yellow('  │') + chalk.gray(` Your size: $${userOrderSize.toFixed(2)} | Trader size: $${trade.usdcSize.toFixed(2)}`) + ' '.repeat(16) + chalk.yellow('│'));
-                        console.log(chalk.yellow('  │') + chalk.gray(` Waiting for total to reach $${TRADE_AGGREGATION_MIN_TOTAL_USD.toFixed(2)}...`) + ' '.repeat(30) + chalk.yellow('│'));
-                        console.log(chalk.yellow('  └' + '─'.repeat(66) + '┘\n'));
+                        // Discreet aggregation log
+                        Logger.info(`📦 Aggregating small trade: $${userOrderSize.toFixed(2)} added to buffer (Trader: $${trade.usdcSize.toFixed(2)})`);
                         
                         trade.usdcSize = userOrderSize; 
                         addToAggregationBuffer(trade);

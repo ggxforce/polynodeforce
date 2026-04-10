@@ -218,7 +218,7 @@ const postOrder = async (
         while (remaining > 0 && retry < RETRY_LIMIT) {
             const orderBook = await clobClient.getOrderBook(trade.asset);
             if (!orderBook.asks || orderBook.asks.length === 0) {
-                Logger.info(`[SKIP] No asks available for ${trade.slug || trade.asset}`);
+                // Silently skip - no console log
                 await UserActivity.updateOne({ _id: trade._id }, { bot: true });
                 break;
             }
@@ -231,17 +231,14 @@ const postOrder = async (
             const slippagePercent = (bestAskPrice - trade.price) / trade.price;
 
             if (slippagePercent > ENV.SLIPPAGE_TOLERANCE) {
-                // Discreet skip message instead of a warning block
-                Logger.info(
-                    `[SKIP] Slippage too high for ${trade.slug || trade.asset} (${(slippagePercent * 100).toFixed(1)}% > ${(ENV.SLIPPAGE_TOLERANCE * 100).toFixed(1)}%)`
-                );
+                // Silently skip - no console log
                 await UserActivity.updateOne({ _id: trade._id }, { bot: true });
                 break;
             }
 
             // Check if remaining amount is below minimum
             if (remaining < MIN_ORDER_SIZE_USD) {
-                Logger.info(`[SKIP] Order size $${remaining.toFixed(2)} too small`);
+                // Silently skip - no console log
                 await UserActivity.updateOne({ _id: trade._id }, { bot: true, myBoughtSize: totalBoughtTokens });
                 break;
             }
@@ -412,10 +409,7 @@ const postOrder = async (
 
         // Check minimum order size
         if (remaining < MIN_ORDER_SIZE_TOKENS) {
-            Logger.warning(
-                `❌ Cannot execute: Sell amount ${remaining.toFixed(2)} tokens below minimum (${MIN_ORDER_SIZE_TOKENS} token)`
-            );
-            Logger.warning(`💡 This happens when position sizes are too small or mismatched`);
+            // Silently skip
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
             return;
         }
