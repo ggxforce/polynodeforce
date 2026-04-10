@@ -117,6 +117,7 @@ const fetchTradeData = async () => {
             }
 
             // Process each activity
+            let newTradesCount = 0;
             for (const activity of activities) {
                 // Skip if too old or before monitor started
                 const tooOldLimit = Math.floor(Date.now() / 1000) - (TOO_OLD_TIMESTAMP * 3600);
@@ -161,7 +162,11 @@ const fetchTradeData = async () => {
                 });
 
                 await newActivity.save();
-                Logger.info(`New trade detected for ${address.slice(0, 6)}...${address.slice(-4)}`);
+                newTradesCount++;
+            }
+
+            if (newTradesCount > 0) {
+                Logger.info(`Detected ${newTradesCount} new trade(s) for ${address.slice(0, 6)}...${address.slice(-4)}`);
             }
 
             // Also fetch and update positions
@@ -241,7 +246,11 @@ const tradeMonitor = async () => {
     // but we still do a quick init check if needed.
     
     while (isRunning) {
-        await fetchTradeData();
+        try {
+            await fetchTradeData();
+        } catch (error) {
+            Logger.error(`Trade monitor iteration failed: ${error}`);
+        }
         if (!isRunning) break;
         await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL * 1000));
     }

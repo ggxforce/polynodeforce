@@ -40,6 +40,20 @@ interface AggregatedTrade {
     lastTradeTime: number;
 }
 
+// Cache for positions to avoid redundant API calls within a single execution cycle
+const positionsCache: Map<string, { data: any; timestamp: number }> = new Map();
+
+const getCachedPositions = async (address: string): Promise<UserPositionInterface[]> => {
+    const now = Date.now();
+    const cached = positionsCache.get(address);
+    if (cached && now - cached.timestamp < 5000) { // 5-second cache
+        return cached.data;
+    }
+    const data = await fetchData(`https://data-api.polymarket.com/positions?user=${address}`);
+    positionsCache.set(address, { data, timestamp: now });
+    return data;
+};
+
 // Buffer for aggregating trades
 const tradeAggregationBuffer: Map<string, AggregatedTrade> = new Map();
 
@@ -176,12 +190,10 @@ const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
         // Mark trade as being processed immediately to prevent duplicate processing
         await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
 
-        const my_positions: UserPositionInterface[] = await fetchData(
-            `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
-        );
-        const user_positions: UserPositionInterface[] = await fetchData(
-            `https://data-api.polymarket.com/positions?user=${trade.userAddress}`
-        );
+        const [my_positions, user_positions] = await Promise.all([
+            getCachedPositions(PROXY_WALLET),
+            getCachedPositions(trade.userAddress)
+        ]);
         const my_position = my_positions.find(
             (position: UserPositionInterface) => position.conditionId === trade.conditionId
         );
@@ -233,12 +245,10 @@ const doAggregatedTrading = async (clobClient: ClobClient, aggregatedTrades: Agg
             await UserActivity.updateOne({ _id: trade._id }, { bot: true, botExcutedTime: 1 }).exec();
         }
 
-        const my_positions: UserPositionInterface[] = await fetchData(
-            `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
-        );
-        const user_positions: UserPositionInterface[] = await fetchData(
-            `https://data-api.polymarket.com/positions?user=${agg.userAddress}`
-        );
+        const [my_positions, user_positions] = await Promise.all([
+            getCachedPositions(PROXY_WALLET),
+            getCachedPositions(agg.userAddress)
+        ]);
         const my_position = my_positions.find(
             (position: UserPositionInterface) => position.conditionId === agg.conditionId
         );
@@ -304,95 +314,107 @@ const tradeExecutor = async (clobClient: ClobClient) => {
 
     let lastCheck = Date.now();
     while (isRunning) {
-        const trades = await readTempTrades();
+        try {
+            const trades = await readTempTrades();
 
-        if (TRADE_AGGREGATION_ENABLED) {
-            // Process with aggregation logic
-            if (trades.length > 0) {
-                // Process each detected trade
-                for (const trade of trades) {
-                    const UserActivity = getUserActivityModel(trade.userAddress);
+            if (TRADE_AGGREGATION_ENABLED) {
+                // Process with aggregation logic
+                if (trades.length > 0) {
+                    // Process each detected trade
+                    for (const trade of trades) {
+                        const UserActivity = getUserActivityModel(trade.userAddress);
 
-                    // 1. Check for trade freshness right away (Max 60 seconds)
-                    const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
-                    if (tradeAgeSeconds > 60) {
-                        await UserActivity.updateOne({ _id: trade._id }, { bot: true });
-                        continue;
-                    }
+                        // 1. Check for trade freshness right away (Max 60 seconds)
+                        const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
+                        if (tradeAgeSeconds > 60) {
+                            await UserActivity.updateOne({ _id: trade._id }, { bot: true });
+                            continue;
+                        }
 
-                    // 2. Calculate user's order size
-                    const my_balance = await getMyBalance(PROXY_WALLET);
-                    const orderCalc = calculateOrderSize(
-                        ENV.COPY_STRATEGY_CONFIG,
-                        trade.usdcSize,
-                        my_balance,
-                        0 
-                    );
-
-                    // 3. Decide: Execute or Aggregate?
-                    const userOrderSize = orderCalc.finalAmount;
-
-                    if (trade.side === 'BUY' && userOrderSize < TRADE_AGGREGATION_MIN_TOTAL_USD) {
-                        // Discreet aggregation log
-                        Logger.info(`📦 Aggregating small trade: $${userOrderSize.toFixed(2)} added to buffer (Trader: $${trade.usdcSize.toFixed(2)})`);
-                        
-                        trade.usdcSize = userOrderSize; 
-                        addToAggregationBuffer(trade);
-                        
-                        // IMPORTANT: Mark as in-progress in DB so we don't repeatedly fetch it!
-                        await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
-                    } else {
-                        // Large/Fresh trades go through immediately
-                        Logger.clearLine();
-                        Logger.header(`⚡ IMMEDIATE TRADE (Fresh entry)`);
-                        await doTrading(clobClient, [trade]);
-                    }
-                }
-                lastCheck = Date.now();
-            }
-
-            // Check for ready aggregated trades
-            const readyAggregations = getReadyAggregatedTrades();
-            if (readyAggregations.length > 0) {
-                Logger.clearLine();
-                // Special banner for aggregated execution
-                console.log(chalk.cyanBright.bold('\n  🚀 TRIGGERING AGGREGATED EXECUTION (' + readyAggregations.length + ' groups ready)'));
-                
-                await doAggregatedTrading(clobClient, readyAggregations);
-                lastCheck = Date.now();
-            }
-
-            // Update waiting message
-            if (trades.length === 0 && readyAggregations.length === 0) {
-                if (Date.now() - lastCheck > 300) {
-                    const bufferedCount = tradeAggregationBuffer.size;
-                    if (bufferedCount > 0) {
-                        Logger.waiting(
-                            USER_ADDRESSES.length,
-                            `${bufferedCount} trade group(s) pending`
+                        // 2. Calculate user's order size
+                        const my_balance = await getMyBalance(PROXY_WALLET);
+                        const orderCalc = calculateOrderSize(
+                            ENV.COPY_STRATEGY_CONFIG,
+                            trade.usdcSize,
+                            my_balance,
+                            0 
                         );
-                    } else {
-                        Logger.waiting(USER_ADDRESSES.length);
+
+                        // 3. Decide: Execute or Aggregate?
+                        const userOrderSize = orderCalc.finalAmount;
+
+                        if (trade.side === 'BUY' && userOrderSize < TRADE_AGGREGATION_MIN_TOTAL_USD) {
+                            // Discreet aggregation log
+                            Logger.info(`📦 Aggregating small trade: $${userOrderSize.toFixed(2)} added to buffer (Trader: $${trade.usdcSize.toFixed(2)})`);
+                            
+                            trade.usdcSize = userOrderSize; 
+                            addToAggregationBuffer(trade);
+                            
+                            // IMPORTANT: Mark as in-progress in DB so we don't repeatedly fetch it!
+                            await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
+                        } else {
+                            // Large/Fresh trades go through immediately
+                            Logger.clearLine();
+                            Logger.header(`⚡ IMMEDIATE TRADE (Fresh entry)`);
+                            await doTrading(clobClient, [trade]);
+                        }
                     }
                     lastCheck = Date.now();
                 }
-            }
-        } else {
-            // Original non-aggregation logic
-            if (trades.length > 0) {
-                Logger.clearLine();
-                Logger.header(
-                    `⚡ ${trades.length} NEW TRADE${trades.length > 1 ? 'S' : ''} TO COPY`
-                );
-                await doTrading(clobClient, trades);
-                lastCheck = Date.now();
-            } else {
-                // Update waiting message every 300ms for smooth animation
-                if (Date.now() - lastCheck > 300) {
-                    Logger.waiting(USER_ADDRESSES.length);
+
+                // Check for ready aggregated trades
+                const readyAggregations = getReadyAggregatedTrades();
+                if (readyAggregations.length > 0) {
+                    Logger.clearLine();
+                    // Special banner for aggregated execution
+                    console.log(chalk.cyanBright.bold('\n  🚀 TRIGGERING AGGREGATED EXECUTION (' + readyAggregations.length + ' groups ready)'));
+                    
+                    await doAggregatedTrading(clobClient, readyAggregations);
                     lastCheck = Date.now();
                 }
+
+                // Update waiting message
+                if (trades.length === 0 && readyAggregations.length === 0) {
+                    if (Date.now() - lastCheck > 300) {
+                        const bufferedCount = tradeAggregationBuffer.size;
+                        if (bufferedCount > 0) {
+                            Logger.waiting(
+                                USER_ADDRESSES.length,
+                                `${bufferedCount} trade group(s) pending`
+                            );
+                        } else {
+                            Logger.waiting(USER_ADDRESSES.length);
+                        }
+                        lastCheck = Date.now();
+                    }
+                }
+            } else {
+                // Original non-aggregation logic
+                if (trades.length > 0) {
+                    Logger.clearLine();
+                    Logger.header(
+                        `⚡ ${trades.length} NEW TRADE${trades.length > 1 ? 'S' : ''} TO COPY`
+                    );
+                    // Parallelize execution with a concurrency limit
+                    const batchSize = 3;
+                    for (let i = 0; i < trades.length; i += batchSize) {
+                        const batch = trades.slice(i, i + batchSize);
+                        await Promise.all(batch.map(trade => doTrading(clobClient, [trade])));
+                        if (i + batchSize < trades.length) {
+                            await new Promise(resolve => setTimeout(resolve, 500)); // Small pause between batches
+                        }
+                    }
+                    lastCheck = Date.now();
+                } else {
+                    // Update waiting message every 300ms for smooth animation
+                    if (Date.now() - lastCheck > 300) {
+                        Logger.waiting(USER_ADDRESSES.length);
+                        lastCheck = Date.now();
+                    }
+                }
             }
+        } catch (error) {
+            Logger.error(`Trade executor loop error: ${error}`);
         }
 
         if (!isRunning) break;

@@ -36,13 +36,19 @@ const fetchData = async (url: string) => {
             });
             return response.data;
         } catch (error) {
+            const isRateLimit = axios.isAxiosError(error) && error.response?.status === 429;
             const isLastAttempt = attempt === retries;
 
-            if (isNetworkError(error) && !isLastAttempt) {
-                const delay = retryDelay * Math.pow(2, attempt - 1); // Exponential backoff: 1s, 2s, 4s
-                console.warn(
-                    `⚠️  Network error (attempt ${attempt}/${retries}), retrying in ${delay / 1000}s...`
-                );
+            if ((isNetworkError(error) || isRateLimit) && !isLastAttempt) {
+                const baseDelay = isRateLimit ? 5000 : 1000; // Wait longer for rate limits
+                const delay = baseDelay * Math.pow(2, attempt - 1);
+                
+                if (isRateLimit) {
+                    console.warn(`⚠️  Rate limit (429) on ${new URL(url).hostname} (attempt ${attempt}/${retries}), backing off for ${delay / 1000}s...`);
+                } else {
+                    console.warn(`⚠️  Network error (attempt ${attempt}/${retries}), retrying in ${delay / 1000}s...`);
+                }
+                
                 await sleep(delay);
                 continue;
             }
