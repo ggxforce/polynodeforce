@@ -176,50 +176,95 @@ const getReadyAggregatedTrades = (): AggregatedTrade[] => {
 };
 
 const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
+    if (trades.length === 0) return;
+
+    // ── STEP 1: Pre-filter trades instantly (NO API calls) ──
+    // Calculate minimum trader order size that would produce at least $0.30 copy.
+    // Trades producing $0.30-$0.99 will be rounded up to $1.00 by calculateOrderSize.
+    // Only truly dust trades (producing < $0.30) are skipped.
+    const copyPercent = ENV.COPY_STRATEGY_CONFIG.copySize / 100;
+    const minViableTraderSize = 0.30 / copyPercent; // e.g. at 3%: $0.30/0.03 = $10
+
+    const viableTrades: TradeWithUser[] = [];
+    const skippedIds: any[] = [];
+
     for (const trade of trades) {
-        const UserActivity = getUserActivityModel(trade.userAddress);
-
-        // 1. Check for trade freshness (Max 60 seconds)
         const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
-        if (tradeAgeSeconds > 60) {
-            // Log quietly only for very old trades
-            await UserActivity.updateOne({ _id: trade._id }, { bot: true });
-            continue;
+
+        // Skip stale trades (> 60s old) or trades too small to ever produce a viable order
+        if (tradeAgeSeconds > 60 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
+            skippedIds.push(trade._id);
+        } else {
+            viableTrades.push(trade);
         }
+    }
 
-        // Mark trade as being processed immediately to prevent duplicate processing
-        await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
+    // Batch-mark all skipped trades as processed in ONE database call per user
+    if (skippedIds.length > 0) {
+        const addressGroups = new Map<string, any[]>();
+        for (const trade of trades) {
+            if (skippedIds.includes(trade._id)) {
+                const group = addressGroups.get(trade.userAddress) || [];
+                group.push(trade._id);
+                addressGroups.set(trade.userAddress, group);
+            }
+        }
+        for (const [addr, ids] of addressGroups) {
+            const UserActivity = getUserActivityModel(addr);
+            await UserActivity.updateMany({ _id: { $in: ids } }, { bot: true, botExcutedTime: 1 });
+        }
+    }
 
-        const [my_positions, user_positions] = await Promise.all([
-            getCachedPositions(PROXY_WALLET),
-            getCachedPositions(trade.userAddress)
-        ]);
-        const my_position = my_positions.find(
-            (position: UserPositionInterface) => position.conditionId === trade.conditionId
-        );
-        const user_position = user_positions.find(
-            (position: UserPositionInterface) => position.conditionId === trade.conditionId
-        );
+    if (viableTrades.length === 0) return;
 
-        // Get USDC balance
-        const my_balance = await getMyBalance(PROXY_WALLET);
+    // Show header with accurate count (only viable trades)
+    Logger.header(
+        `⚡ ${viableTrades.length} TRADE${viableTrades.length > 1 ? 'S' : ''} TO COPY${skippedIds.length > 0 ? ` (${skippedIds.length} dust skipped)` : ''}`
+    );
 
-        // Calculate trader's total portfolio value from positions
-        const user_balance = user_positions.reduce((total, pos) => {
-            return total + (pos.currentValue || 0);
-        }, 0);
+    // ── STEP 2: Fetch shared data ONCE for all viable trades ──
+    const my_balance = await getMyBalance(PROXY_WALLET);
+    const firstTrade = viableTrades[0];
+    const [my_positions, user_positions] = await Promise.all([
+        getCachedPositions(PROXY_WALLET),
+        getCachedPositions(firstTrade.userAddress)
+    ]);
+    const user_balance = user_positions.reduce((total, pos) => {
+        return total + (pos.currentValue || 0);
+    }, 0);
 
-        // Execute the trade (logging will happen inside postOrder if it proceeds)
-        await postOrder(
-            clobClient,
-            trade.side === 'BUY' ? 'buy' : 'sell',
-            my_position,
-            user_position,
-            trade,
-            my_balance,
-            user_balance,
-            trade.userAddress
-        );
+    // ── STEP 3: Execute viable trades in parallel batches of 3 ──
+    const batchSize = 3;
+    for (let i = 0; i < viableTrades.length; i += batchSize) {
+        const batch = viableTrades.slice(i, i + batchSize);
+        
+        await Promise.all(batch.map(async (trade) => {
+            const UserActivity = getUserActivityModel(trade.userAddress);
+            await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
+
+            const my_position = my_positions.find(
+                (position: UserPositionInterface) => position.conditionId === trade.conditionId
+            );
+            const user_position = user_positions.find(
+                (position: UserPositionInterface) => position.conditionId === trade.conditionId
+            );
+
+            await postOrder(
+                clobClient,
+                trade.side === 'BUY' ? 'buy' : 'sell',
+                my_position,
+                user_position,
+                trade,
+                my_balance,
+                user_balance,
+                trade.userAddress
+            );
+        }));
+        
+        // Small pause between batches to avoid rate limits
+        if (i + batchSize < viableTrades.length) {
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
     }
 };
 
@@ -320,43 +365,52 @@ const tradeExecutor = async (clobClient: ClobClient) => {
             if (TRADE_AGGREGATION_ENABLED) {
                 // Process with aggregation logic
                 if (trades.length > 0) {
-                    // Process each detected trade
+                    // Pre-filter: skip dust trades and stale trades BEFORE any API calls
+                    const copyPercent = ENV.COPY_STRATEGY_CONFIG.copySize / 100;
+                    const minViableTraderSize = 0.30 / copyPercent;
+                    
+                    const viableTrades: TradeWithUser[] = [];
+                    const dustIds: any[] = [];
+                    
                     for (const trade of trades) {
-                        const UserActivity = getUserActivityModel(trade.userAddress);
-
-                        // 1. Check for trade freshness right away (Max 60 seconds)
                         const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
-                        if (tradeAgeSeconds > 60) {
-                            await UserActivity.updateOne({ _id: trade._id }, { bot: true });
-                            continue;
-                        }
-
-                        // 2. Calculate user's order size
-                        const my_balance = await getMyBalance(PROXY_WALLET);
-                        const orderCalc = calculateOrderSize(
-                            ENV.COPY_STRATEGY_CONFIG,
-                            trade.usdcSize,
-                            my_balance,
-                            0 
-                        );
-
-                        // 3. Decide: Execute or Aggregate?
-                        const userOrderSize = orderCalc.finalAmount;
-
-                        if (trade.side === 'BUY' && userOrderSize < TRADE_AGGREGATION_MIN_TOTAL_USD) {
-                            // Discreet aggregation log
-                            Logger.info(`📦 Aggregating small trade: $${userOrderSize.toFixed(2)} added to buffer (Trader: $${trade.usdcSize.toFixed(2)})`);
-                            
-                            trade.usdcSize = userOrderSize; 
-                            addToAggregationBuffer(trade);
-                            
-                            // IMPORTANT: Mark as in-progress in DB so we don't repeatedly fetch it!
-                            await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
+                        if (tradeAgeSeconds > 60 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
+                            dustIds.push(trade._id);
                         } else {
-                            // Large/Fresh trades go through immediately
-                            Logger.clearLine();
-                            Logger.header(`⚡ IMMEDIATE TRADE (Fresh entry)`);
-                            await doTrading(clobClient, [trade]);
+                            viableTrades.push(trade);
+                        }
+                    }
+
+                    // Batch-mark dust/stale trades as processed
+                    if (dustIds.length > 0) {
+                        for (const { address, model } of userActivityModels) {
+                            await model.updateMany({ _id: { $in: dustIds } }, { bot: true, botExcutedTime: 1 });
+                        }
+                    }
+
+                    // Only fetch balance once for all viable trades
+                    if (viableTrades.length > 0) {
+                        const my_balance = await getMyBalance(PROXY_WALLET);
+                        
+                        for (const trade of viableTrades) {
+                            const UserActivity = getUserActivityModel(trade.userAddress);
+                            const orderCalc = calculateOrderSize(
+                                ENV.COPY_STRATEGY_CONFIG,
+                                trade.usdcSize,
+                                my_balance,
+                                0 
+                            );
+                            const userOrderSize = orderCalc.finalAmount;
+
+                            if (trade.side === 'BUY' && userOrderSize < TRADE_AGGREGATION_MIN_TOTAL_USD) {
+                                trade.usdcSize = userOrderSize; 
+                                addToAggregationBuffer(trade);
+                                await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
+                            } else {
+                                Logger.clearLine();
+                                Logger.header(`⚡ IMMEDIATE TRADE (Fresh entry)`);
+                                await doTrading(clobClient, [trade]);
+                            }
                         }
                     }
                     lastCheck = Date.now();
@@ -392,18 +446,8 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                 // Original non-aggregation logic
                 if (trades.length > 0) {
                     Logger.clearLine();
-                    Logger.header(
-                        `⚡ ${trades.length} NEW TRADE${trades.length > 1 ? 'S' : ''} TO COPY`
-                    );
-                    // Parallelize execution with a concurrency limit
-                    const batchSize = 3;
-                    for (let i = 0; i < trades.length; i += batchSize) {
-                        const batch = trades.slice(i, i + batchSize);
-                        await Promise.all(batch.map(trade => doTrading(clobClient, [trade])));
-                        if (i + batchSize < trades.length) {
-                            await new Promise(resolve => setTimeout(resolve, 500)); // Small pause between batches
-                        }
-                    }
+                    // doTrading handles pre-filtering, batching, and execution
+                    await doTrading(clobClient, trades);
                     lastCheck = Date.now();
                 } else {
                     // Update waiting message every 300ms for smooth animation

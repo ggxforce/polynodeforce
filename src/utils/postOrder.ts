@@ -176,11 +176,6 @@ const postOrder = async (
         metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
     } else if (condition === 'buy') {
         //Buy strategy
-        Logger.info('Executing BUY strategy...');
-
-        Logger.info(`Your balance: $${my_balance.toFixed(2)}`);
-        Logger.info(`Trader bought: $${trade.usdcSize.toFixed(2)}`);
-
         const currentPositionValue = my_position ? my_position.size * my_position.avgPrice : 0;
 
         // Calculate or use aggregated order size
@@ -191,7 +186,6 @@ const postOrder = async (
                 reasoning: `using pre-calculated aggregated volume $${trade.usdcSize.toFixed(2)}`,
                 belowMinimum: false
             };
-            Logger.info(`📦 Aggregation: ${orderCalc.reasoning}`);
         } else {
             // Use new copy strategy system for individual trades
             orderCalc = calculateOrderSize(
@@ -200,12 +194,10 @@ const postOrder = async (
                 my_balance,
                 currentPositionValue
             );
-            Logger.info(`📊 ${orderCalc.reasoning}`);
         }
 
-        // Log reasoning and check for early exit
+        // Early exit for zero/invalid amounts - completely silent
         if (orderCalc.finalAmount === 0) {
-            // Silently complete if it's truly zero/invalid
             await UserActivity.updateOne({ _id: trade._id }, { bot: true });
             return;
         }
