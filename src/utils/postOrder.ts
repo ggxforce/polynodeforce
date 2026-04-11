@@ -142,6 +142,8 @@ const postOrder = async (
                     `Sold ${order_arges.amount} tokens at $${order_arges.price}`
                 );
                 remaining -= order_arges.amount;
+                metrics.recordTradeStatus('executed');
+                metrics.recordTradeSize(order_arges.amount * order_arges.price);
             } else {
                 const errorMessage = extractOrderError(resp);
                 if (isInsufficientBalanceOrAllowanceError(errorMessage)) {
@@ -279,6 +281,8 @@ const postOrder = async (
                 );
                 remaining -= order_arges.amount;
                 metrics.recordTrade(ENV.DRY_MODE ? 'simulated' : 'executed', trade.isAggregated ? 'aggregated' : 'immediate');
+                metrics.recordTradeStatus('executed');
+                metrics.recordTradeSize(order_arges.amount);
             } else {
                 const errorMessage = extractOrderError(resp);
                 if (isInsufficientBalanceOrAllowanceError(errorMessage)) {
@@ -303,6 +307,7 @@ const postOrder = async (
                 { bot: true, botExcutedTime: RETRY_LIMIT, myBoughtSize: totalBoughtTokens }
             );
             metrics.recordTrade('failed', trade.isAggregated ? 'aggregated' : 'immediate');
+            metrics.recordTradeStatus('failed');
             metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
             return;
         }
@@ -476,6 +481,8 @@ const postOrder = async (
                 );
                 remaining -= order_arges.amount;
                 metrics.recordTrade(ENV.DRY_MODE ? 'simulated' : 'executed', trade.isAggregated ? 'aggregated' : 'immediate');
+                metrics.recordTradeStatus('executed');
+                metrics.recordTradeSize(order_arges.amount * order_arges.price);
             } else {
                 const errorMessage = extractOrderError(resp);
                 if (isInsufficientBalanceOrAllowanceError(errorMessage)) {
@@ -535,6 +542,7 @@ const postOrder = async (
                 { bot: true, botExcutedTime: RETRY_LIMIT }
             );
             metrics.recordTrade('failed', trade.isAggregated ? 'aggregated' : 'immediate');
+            metrics.recordTradeStatus('failed');
             metrics.recordLatency(tradeType, (Date.now() - startTime) / 1000);
             return;
         }

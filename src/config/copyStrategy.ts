@@ -79,7 +79,8 @@ export function calculateOrderSize(
     let reasoning: string;
 
     // Special logic for small trader orders (< $1)
-    if (traderOrderSize < 1.0) {
+    // Only applies to non-FIXED strategies to maintain standard copy behavior
+    if (config.strategy !== CopyStrategy.FIXED && traderOrderSize < 1.0) {
         if (traderOrderSize >= 0.65) {
             baseAmount = 1.0;
             reasoning = `Trader bet is < $1.00 but >= $0.65, rounding to minimum $1.00 as requested`;
@@ -104,8 +105,27 @@ export function calculateOrderSize(
                 break;
 
             case CopyStrategy.FIXED:
-                baseAmount = config.copySize;
-                reasoning = `Fixed amount: $${baseAmount.toFixed(2)}`;
+                if (traderOrderSize < 0.65) {
+                    return {
+                        traderOrderSize,
+                        baseAmount: 0,
+                        finalAmount: 0,
+                        strategy: config.strategy,
+                        cappedByMax: false,
+                        reducedByBalance: false,
+                        belowMinimum: true,
+                        reasoning: `Trader bet ($${traderOrderSize.toFixed(2)}) is below $0.65 threshold for FIXED strategy. Skipping.`,
+                    };
+                } else if (traderOrderSize < 9.0) {
+                    baseAmount = 1.0;
+                } else if (traderOrderSize < 20.0) {
+                    baseAmount = 2.0;
+                } else if (traderOrderSize < 99.0) {
+                    baseAmount = 3.0;
+                } else {
+                    baseAmount = 5.0;
+                }
+                reasoning = `Fixed tier amount for trader bet $${traderOrderSize.toFixed(2)}: $${baseAmount.toFixed(2)}`;
                 break;
 
             case CopyStrategy.ADAPTIVE:

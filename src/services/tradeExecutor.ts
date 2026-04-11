@@ -8,6 +8,7 @@ import getMyBalance from '../utils/getMyBalance';
 import postOrder from '../utils/postOrder';
 import Logger from '../utils/logger';
 import { calculateOrderSize } from '../config/copyStrategy';
+import { metrics } from '../utils/metrics';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
@@ -178,12 +179,12 @@ const getReadyAggregatedTrades = (): AggregatedTrade[] => {
 const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
     if (trades.length === 0) return;
 
-    // ── STEP 1: Pre-filter trades instantly (NO API calls) ──
-    // Calculate minimum trader order size that would produce at least $0.30 copy.
-    // Trades producing $0.30-$0.99 will be rounded up to $1.00 by calculateOrderSize.
-    // Only truly dust trades (producing < $0.30) are skipped.
-    const copyPercent = ENV.COPY_STRATEGY_CONFIG.copySize / 100;
-    const minViableTraderSize = 0.65 / copyPercent; // Updated to 0.65 threshold
+    // Calculate minimum trader order size that would produce at least $0.65 copy (rounded to $1).
+    // For FIXED strategy, the minimum valid size is $0.65.
+    const strategy = ENV.COPY_STRATEGY_CONFIG.strategy;
+    const minViableTraderSize = strategy === 'FIXED' 
+        ? 0.65 
+        : 0.65 / (ENV.COPY_STRATEGY_CONFIG.copySize / 100);
 
     const viableTrades: TradeWithUser[] = [];
     const skippedIds: any[] = [];
@@ -194,6 +195,7 @@ const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
         // Skip stale trades (> 60s old) or trades too small to ever produce a viable order
         if (tradeAgeSeconds > 60 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
             skippedIds.push(trade._id);
+            metrics.recordTradeStatus('skipped');
         } else {
             viableTrades.push(trade);
         }
@@ -366,8 +368,10 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                 // Process with aggregation logic
                 if (trades.length > 0) {
                     // Pre-filter: skip dust trades and stale trades BEFORE any API calls
-                    const copyPercent = ENV.COPY_STRATEGY_CONFIG.copySize / 100;
-                    const minViableTraderSize = 0.65 / copyPercent;
+                    const strategy = ENV.COPY_STRATEGY_CONFIG.strategy;
+                    const minViableTraderSize = strategy === 'FIXED' 
+                        ? 0.65 
+                        : 0.65 / (ENV.COPY_STRATEGY_CONFIG.copySize / 100);
                     
                     const viableTrades: TradeWithUser[] = [];
                     const dustIds: any[] = [];
@@ -376,6 +380,7 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                         const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
                         if (tradeAgeSeconds > 60 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
                             dustIds.push(trade._id);
+                            metrics.recordTradeStatus('skipped');
                         } else {
                             viableTrades.push(trade);
                         }

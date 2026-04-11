@@ -14,6 +14,10 @@ class MetricsService {
     public botPnL: Gauge<string>;
     public totalPortfolioValue: Gauge<string>;
     public openPositionsCount: Gauge<string>;
+    
+    // Custom specific counters
+    public tradeSizeCounter: Counter<string>;
+    public tradeStatusCounter: Counter<string>;
 
     constructor() {
         this.registry = new Registry();
@@ -57,10 +61,42 @@ class MetricsService {
             help: 'Number of currently open positions',
             registers: [this.registry],
         });
+
+        this.tradeSizeCounter = new Counter({
+            name: 'bot_trade_sizes_total',
+            help: 'Number of executed trades per fixed size bucket',
+            labelNames: ['size'], // '1usd', '2usd', '3usd', '5usd', 'other'
+            registers: [this.registry],
+        });
+
+        this.tradeStatusCounter = new Counter({
+            name: 'bot_trade_status_custom',
+            help: 'Total number of trades executed or skipped',
+            labelNames: ['status'], // 'executed', 'skipped', 'failed'
+            registers: [this.registry],
+        });
     }
 
     public recordTrade(status: 'executed' | 'simulated' | 'failed' | 'completed', type: 'immediate' | 'aggregated' = 'immediate') {
         this.tradesTotal.inc({ status, type });
+    }
+
+    public recordTradeSize(amount: number) {
+        if (amount >= 0.9 && amount <= 1.1) {
+            this.tradeSizeCounter.inc({ size: '1usd' });
+        } else if (amount >= 1.9 && amount <= 2.1) {
+            this.tradeSizeCounter.inc({ size: '2usd' });
+        } else if (amount >= 2.9 && amount <= 3.1) {
+            this.tradeSizeCounter.inc({ size: '3usd' });
+        } else if (amount >= 4.9 && amount <= 5.1) {
+            this.tradeSizeCounter.inc({ size: '5usd' });
+        } else {
+            this.tradeSizeCounter.inc({ size: 'other' });
+        }
+    }
+
+    public recordTradeStatus(status: 'executed' | 'skipped' | 'failed') {
+        this.tradeStatusCounter.inc({ status });
     }
 
     public recordLatency(action: string, seconds: number) {
