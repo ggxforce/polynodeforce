@@ -192,10 +192,13 @@ const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
     for (const trade of trades) {
         const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
 
-        // Skip stale trades (> 60s old) or trades too small to ever produce a viable order
-        if (tradeAgeSeconds > 60 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
+        // Skip stale trades (> 180s old) or trades too small to ever produce a viable order
+        if (tradeAgeSeconds > 180 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
             skippedIds.push(trade._id);
             metrics.recordTradeStatus('skipped');
+            if (tradeAgeSeconds > 180) {
+                Logger.info(`Ignored trade because it's too old (${tradeAgeSeconds}s ago): ${trade.transactionHash.slice(0,10)}...`);
+            }
         } else {
             viableTrades.push(trade);
         }
@@ -378,9 +381,12 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                     
                     for (const trade of trades) {
                         const tradeAgeSeconds = Math.floor(Date.now() / 1000) - trade.timestamp;
-                        if (tradeAgeSeconds > 60 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
+                        if (tradeAgeSeconds > 180 || (trade.side === 'BUY' && trade.usdcSize < minViableTraderSize)) {
                             dustIds.push(trade._id);
                             metrics.recordTradeStatus('skipped');
+                            if (tradeAgeSeconds > 180) {
+                                Logger.info(`Ignored trade because it's too old (${tradeAgeSeconds}s ago): ${trade.transactionHash.slice(0,10)}...`);
+                            }
                         } else {
                             viableTrades.push(trade);
                         }

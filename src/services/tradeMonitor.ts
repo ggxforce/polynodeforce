@@ -221,8 +221,8 @@ const fetchTradeData = async () => {
 let isFirstRun = true;
 // Track if monitor should continue running
 let isRunning = true;
-// Initial timestamp to skip historical trades (set on startup)
-let MONITOR_START_TIMESTAMP = Math.floor(Date.now() / 1000);
+// Initial timestamp to skip historical trades (set on startup) - Add 5 mins buffer for clock skew
+let MONITOR_START_TIMESTAMP = Math.floor(Date.now() / 1000) - 300;
 
 /**
  * Stop the trade monitor gracefully
@@ -235,8 +235,8 @@ export const stopTradeMonitor = () => {
 const tradeMonitor = async () => {
     await init();
     
-    // Set initial timestamp to now to avoid backfilling old trades
-    MONITOR_START_TIMESTAMP = Math.floor(Date.now() / 1000);
+    // Set initial timestamp to now to avoid backfilling old trades (with 5 min buffer for clock skew)
+    MONITOR_START_TIMESTAMP = Math.floor(Date.now() / 1000) - 300;
     
     Logger.success(`Monitoring ${USER_ADDRESSES.length} trader(s) every ${FETCH_INTERVAL}s`);
     Logger.info(`Starting check from timestamp: ${MONITOR_START_TIMESTAMP} (Right now)`);
